@@ -1,0 +1,6 @@
+2:39 PM
+#copy files from ftps to ec2
+curl --ftp-ssl -u fs_kobelco-dev:6mCQhWJ90jnUdL ftp://kobelco-dev.planning-analytics.cloud.ibm.com/prod/connect_test/tm1server.log -o tm1server.log
+
+#copy files from ec2 to ftps
+curl --ftp-ssl -u fs_kobelco-dev:6mCQhWJ90jnUdL -T /home/ec2-user/s3toftps/pollJoblog.sh ftp://kobelco-dev.planning-analytics.cloud.ibm.com/prod/connect_test/pollJoblog.sh
