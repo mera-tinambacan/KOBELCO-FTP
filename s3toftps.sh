@@ -3,54 +3,54 @@
 # Script Description: Transfer of File from S3 to FTPS
 # Created by: AWS M. Tinambacan
 # Creation Date: 4/1/2024
-# Update:  4/4/2024 AWS R. Nuno
-#                   Refactor Script
-#                   Made several functions for each process.
+# Update:  4/04/2024 AWS R. Nuno
+#                    Refactor Script
+#                    Made several functions for each process.
+# Update:  4/15/2024 AWS R. Nuno
+#                    Enabled Upload all Files
+# Update:  4/17/2024 AWS R. Nuno
+#                    Fix 文字化け when transferring file
+# Update: 4/17/2024  AWS G. Mayuga
+#                    put put_logs function and constants to common_function
+# Update: 4/18/2024  AWS R. Nuno
+#                    added check_interface_file function
+#                    removed API status logs , moved it to APIcall.sh
 
-# Source the parameter functions
-source /home/ec2-user/s3toftps/parameter_function.sh
+# Souce the put_logs functions and constants
+source /home/ec2-user/s3toftps/common_function.sh
 
-# Configuration
-FTPS_SERVER="kobelco-dev.planning-analytics.cloud.ibm.com"
-FTPS_DESTINATION_DIRECTORY="prod/connect_test"
-S3_BUCKET="ipa-connect-budget/HostToIpa"
-BACKUP_S3_BUCKET="ipa-connect-budget/HostToIpa-backup"
-LOG_GROUP_NAME="HostToIPA"
-LOG_STREAM_NAME="RHEL8-HostToIPA-Stream"
-
-# Temporary directory to store the downloaded file
-TEMP_DIR="/tmp"
-
-# SNS Topic ARN for error notifications
-SNS_TOPIC_ARN="arn:aws:sns:ap-northeast-1:282801688861:s3-to-IPA-topic"
-
-# Function to put logs to CloudWatch
-put_logs() {
-    local status_code="$1"
-    local log_level="$2"
-    local message="$3"
-    local timestamp=$(date +%s%3N)
-    local log_event="{\"timestamp\": $timestamp, \"message\": \"$log_level - $message\"}"
-
-    if [[ $status_code -ne 0 ]]; then
-        # Publish error message to SNS
-        aws sns publish --topic-arn "$SNS_TOPIC_ARN" --message "$log_level $message" --subject "ERROR $status_code"
+check_interface_file() {
+    local s3_key="$1"
+    if [[ -n $s3_key ]]; then
+        if grep -qF "$s3_key" "$INTERFACE_FILE"; then
+            put_logs "$?" "[INFO]" "$s3_key is valid"
+            check_file_existence $s3_key
+            echo $s3_key
+        else
+            put_logs "$?" "[INFO]" "$s3_key is invalid"
+            exit 1
+        fi
+    else
+        s3_files=$(aws s3 ls "s3://$S3_BUCKET/" | awk 'NF == 4' | awk '{print $4}')
+        while IFS= read -r s3_key; do
+            if grep -qF "$s3_key" "$INTERFACE_FILE"; then
+                put_logs "$?" "[INFO]" "$s3_key is valid"
+                check_file_existence $s3_key
+                echo $s3_key
+            else
+                put_logs "$?" "[INFO]" "$s3_key is invalid"
+            fi
+        done <<< "$s3_files"
     fi
-    # Use the AWS CLI to put the log event
-    aws logs put-log-events \
-        --log-group-name "$LOG_GROUP_NAME" \
-        --log-stream-name "$LOG_STREAM_NAME" \
-        --log-events "$log_event" >/dev/null 2>&1
 }
 
 check_file_existence() {
     local s3_key="$1"
     put_logs "$?" "[INFO] Checking $s3_key from $S3_BUCKET..."
     if aws s3 ls "s3://$S3_BUCKET/$s3_key" &>/dev/null; then
-        put_logs "$?" "[INFO]" "$s3_key found."
+        put_logs "$?" "[INFO]" "$s3_key found in S3 Bucket."
     else
-        put_logs "$?" "[ERROR]" "$s3_key not found."
-        exit $?
+        put_logs "$?" "[ERROR]" "$s3_key not found in S3 Bucket."
     fi
 }
 
@@ -77,7 +77,6 @@ copy_to_temp_dir() {
 }
 
 fetch_credentials() {
-    # Fetch FTP username and password from source
     if USERNAME=$(get_parameter "/ipa-test/username") && PASSWORD=$(get_parameter "/ipa-test/password"); then
         return 0
     else
@@ -86,13 +85,15 @@ fetch_credentials() {
     fi
 }
 
+
 transfer_files() {
     local s3_key="$1"
     put_logs "$?" "[INFO]" "Transferring $s3_key to ftp://$FTPS_SERVER/$FTPS_DESTINATION_DIRECTORY..."
     copy_to_temp_dir "$s3_key"
     fetch_credentials
     local local_file="$TEMP_DIR/$s3_key"
-    curl -k --ftp-ssl --user "$USERNAME:$PASSWORD" -T "$local_file" "ftp://$FTPS_SERVER/$FTPS_DESTINATION_DIRECTORY/"
+    curl -k --ftp-ssl --user "$USERNAME:$PASSWORD" -Q "OPTS UTF8 ON" -T "$local_file" "ftp://$FTPS_SERVER/$FTPS_DESTINATION_DIRECTORY/"
+
     local curl_exit_code=$?
     if [ $curl_exit_code -eq 0 ]; then
         put_logs "$curl_exit_code" "[INFO]" "$s3_key successfully transferred."
@@ -131,37 +132,38 @@ call_api() {
     local process="$1"
     put_logs "$?" "[INFO]" "Calling API for $process process..."
     local api_response=$(/home/ec2-user/s3toftps/APIcall.sh "$process")
-
-# could use grep
-    if [[ $api_response == *"error"* ]]; then
-        local status_code=$(echo "$api_response" | sed -n 's/.*"code":"\([^"]*\)".*/\1/p')
-        local message=$(echo "$api_response" | sed -n 's/.*"message":"\([^"]*\)".*/\1/p')
-        put_logs "$status_code" "[ERROR]" "$message"
-        return 1
+    if [[ $? -eq 0 ]]; then
+        put_logs "$?" "[INFO]" "API Call for $process process is success."
     else
-        local status_code=$(echo "$api_response" | sed -n 's/.*"ProcessExecuteStatusCode":"\([^"]*\)".*/\1/p')
-        put_logs "$?" "[INFO]" "API call Success."
-        put_logs "$?" "[INFO]" "ProcessExecuteStatusCode: $status_code"
+        put_logs "$?" "[ERROR]" "Something unexpected occurred in API."
     fi
 }
 
 # Main function
 main() {
-    local s3_key="$1"
-    local process="$2"
+    local process="$1"
+    local s3_key="$2"
 
-    check_file_existence "$s3_key"
-    backup "$s3_key"
-    transfer_files "$s3_key"
-    delete_files "$s3_key"
-    call_api "$process"
+    validated_files=$(check_interface_file $s3_key)
+    if [[ -n "$validated_files" ]]; then
+        # Iterate over each line in s3_keys
+        while IFS= read -r validated_file; do
+            put_logs "$?" "[INFO]" "Processing S3 key: $validated_file"
+            backup "$validated_file"
+            transfer_files "$validated_file"
+            delete_files "$validated_file"
+            call_api "$process"
+        done <<< "$validated_files"
+    else
+        put_logs "$?" "[ERROR]" "$s3_key file not found."
+        exit 1
+    fi
 }
 
-if [ "$#" -ne 2 ]; then
-    put_logs "1" "[ERROR]" "Usage: $0 <s3_key> <process>"
+if [ "$#" -gt 2 ] || [ "$#" -lt 1 ]; then
+    put_logs "1" "[ERROR]" "Usage: $0 <s3_key> <process> or Usage: $0 <process>"
     exit 1
 fi
 
 fetch_credentials
 main "$1" "$2"
-
