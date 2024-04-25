@@ -167,4 +167,3 @@ fi
 
 fetch_credentials
 main "$1" "$2"
-

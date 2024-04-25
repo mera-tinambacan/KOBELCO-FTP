@@ -19,6 +19,30 @@ fetch_credentials() {
     fi
 }
 
+# Function to backup a single file from source directory to backup directory
+backup_single_file() {
+  local myfile="$1"
+  # Check if file exists on the server
+  if curl -s --ftp-ssl -u "$USERNAME:$PASSWORD" -Q "OPTS UTF8 ON" "ftp://$FTPS_SERVER/$FTPS_DESTINATION_DIRECTORY/$myfile" >/dev/null; then
+    put_logs "INFO" "File $myfile found on FTPS server."
+    # Copy the file to the backup directory
+    if curl -s -k --ftp-ssl -u "$USERNAME:$PASSWORD" -Q "OPTS UTF8 ON" "ftp://$FTPS_SERVER/$FTPS_DESTINATION_DIRECTORY/$myfile" | \
+      curl -s -k --ftp-ssl -T - -u "$USERNAME:$PASSWORD" -Q "OPTS UTF8 ON" "ftp://$FTPS_SERVER/$FTPS_BACKUP_DIRECTORY/$myfile"; then
+      # Delete file from source directory  
+      curl -k --user "$USERNAME:$PASSWORD" --ftp-ssl -Q "OPTS UTF8 ON" -Q "DELE $FTPS_DESTINATION_DIRECTORY/$myfile" "ftp://$FTPS_SERVER/"
+      put_logs "INFO" "File $myfile copied to backup directory."
+      put_logs "INFO" "File $file has been deleted from the source directory."
+      echo "Backup of $myfile completed."
+      return 0
+    else
+      put_logs "ERROR" "Failed to copy file $myfile to backup directory."
+      return 1
+    fi
+  else
+    put_logs "INFO" "File $myfile not found on FTPS server."
+    return 1
+  fi
+}
 
 # Function to backup files listed in file_list.txt from source directory to backup directory
 backup_all_files() {
@@ -53,38 +77,13 @@ backup_all_files() {
   echo "Backup of files from file_list.txt completed."
 }
 
+# Main script
 # Mark H. (4/17) comment: add copy to s3 function
 #                       : Make a list of interface file names to a text file. Only copy the I/F file that matches in the list.
 #                       : Ignore file that is not included in list.
 #                       : Test for double byte file names.. use -Q "OPTS UTF8 ON" in all curl command that list, download, and upload 
 #     : Poll file until it exist. Polling will stop if time is greater or equal to 12 midnight(this can be changed)
 
-# Function to backup a single file from source directory to backup directory
-# backup_single_file() {
-#   local myfile="$1"
-#   # Check if file exists on the server
-#   if curl -s --ftp-ssl -u "$USERNAME:$PASSWORD" -Q "OPTS UTF8 ON" "ftp://$FTPS_SERVER/$FTPS_DESTINATION_DIRECTORY/$myfile" >/dev/null; then
-#     put_logs "INFO" "File $myfile found on FTPS server."
-#     # Copy the file to the backup directory
-#     if curl -s -k --ftp-ssl -u "$USERNAME:$PASSWORD" -Q "OPTS UTF8 ON" "ftp://$FTPS_SERVER/$FTPS_DESTINATION_DIRECTORY/$myfile" | \
-#       curl -s -k --ftp-ssl -T - -u "$USERNAME:$PASSWORD" -Q "OPTS UTF8 ON" "ftp://$FTPS_SERVER/$FTPS_BACKUP_DIRECTORY/$myfile"; then
-#       # Delete file from source directory  
-#       curl -k --user "$USERNAME:$PASSWORD" --ftp-ssl -Q "OPTS UTF8 ON" -Q "DELE $FTPS_DESTINATION_DIRECTORY/$myfile" "ftp://$FTPS_SERVER/"
-#       put_logs "INFO" "File $myfile copied to backup directory."
-#       put_logs "INFO" "File $file has been deleted from the source directory."
-#       echo "Backup of $myfile completed."
-#       return 0
-#     else
-#       put_logs "ERROR" "Failed to copy file $myfile to backup directory."
-#       return 1
-#     fi
-#   else
-#     put_logs "INFO" "File $myfile not found on FTPS server."
-#     return 1
-#   fi
-# }
-
-# Main script
 fetch_credentials
 if [ "$1" == "single" ]; then
   backup_single_file "$2"
