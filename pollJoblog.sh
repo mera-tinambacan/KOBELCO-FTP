@@ -21,6 +21,10 @@
 #                       1. job process finished. 
 #			2. loop equal or greater than 1 day
 #			Renamed script to pollJoblog.sh
+#        April 11, 2024 AWS Meracle T.
+#                       added getFiles_ftpstoS3 function
+#	 April 11, 2024 AWS Gab M.
+#			insert SNS to poll_file function
 
 MYDIR=/home/ec2-user/s3toftps
 
@@ -37,6 +41,10 @@ LOG_STREAM_NAME="RHEL6-HostToIPA-Stream"
 IPA_LOG_FILE="tm1server.log"
 POLLTIMEINTERVAL=30
 DATENOW=$(date +%s)
+#TEMP_DIR="/home/ec2-user/s3toftps/tmp"
+S3_BUCKET="ipa-connect-budget/HostToIpa"
+BACKUP_S3_BUCKET="ipa-connect-budget/HostToIpa-backup"
+SNS_TOPIC_ARN="arn:aws:sns:ap-northeast-1:282801688861:s3-to-IPA-topic"
 
 # Function to put logs into CloudWatch
 put_logs() {
@@ -49,6 +57,37 @@ put_logs() {
     --log-stream-name "$LOG_STREAM_NAME" \
     --log-events "$log_event" \
     --region ap-northeast-1 >/dev/null 2>&1
+
+  if [ "$log_level" == "ERROR" ]; then
+    aws sns publish --topic-arn "$SNS_TOPIC_ARN" --message "$message" --subject "Error in pollJoblog.sh"
+  fi
+}
+
+getFile_ftpstos3() {
+    local current_date=$(date +%Y%m%d)
+    local filename="${JOBNAME}_${current_date}.csv"
+    local remote_path="/$FTPS_DESTINATION_DIRECTORY/$filename"
+    
+    # Download the file from FTPS server
+    curl -s --ftp-ssl -u "$USERNAME:$PASSWORD" "ftp://$FTPS_SERVER/$FTPS_DESTINATION_DIRECTORY/$filename" -o "$filename"
+
+    # Check if download was successful
+    if [[ -s "$filename" ]]; then
+        # Upload the file to S3 bucket
+        aws s3 cp "$filename" "s3://$S3_BUCKET/$filename" >/dev/null 2>&1
+
+        # Check if upload was successful
+        if [[ $? -eq 0 ]]; then
+            put_logs "INFO" "Downloaded and uploaded file $filename to S3 bucket $S3_BUCKET."
+            return 0
+        else
+            put_logs "ERROR" "Failed to upload file $filename to S3 bucket $S3_BUCKET."
+            return 1
+        fi
+    else
+        put_logs "ERROR" "Failed to download file $filename from FTPS server to $filename"
+        return 1
+    fi
 }
 
 log_file_to_cloudwatch() {
@@ -57,6 +96,9 @@ log_file_to_cloudwatch() {
        put_logs "INFO" "${line}"
        Finished_log="Process ${JOBNAME}:  finished executing normally," 
        if [[ "${line}" == *"$Finished_log"* ]]; then
+          ### Code here to download file tsv/csv to Host.
+	  ### You may call separate script or write a function to get file from FTPtoS3.
+          getFile_ftpstos3
 	  returnfinish=0
        fi
    done
@@ -127,6 +169,7 @@ poll_file() {
 	 ####### Send SNS code below
          # <code me here> or call function
          # 1. Send SNS
+	 aws sns publish --topic-arn "$SNS_TOPIC_ARN" --message "Error log detected for job: $JOBNAME" --subject "Error in pollJoblog.sh"
 	 # 2. Backup ERROR LOG
 	 # 3. Delete ERROR LOG
       else

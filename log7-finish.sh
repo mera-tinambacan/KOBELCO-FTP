@@ -39,3 +39,20 @@ curl --ftp-ssl -u fs_kobelco-dev:6mCQhWJ90jnUdL -T tm1server.log.tmp ftp://kobel
 # Upload modified TM1ProcessError file
 #curl --ftp-ssl -u fs_kobelco-dev:6mCQhWJ90jnUdL -T "TM1ProcessError_20231130140134_41513540_sample.log" ftp://kobelco-dev.planning-analytics.cloud.ibm.com/prod/connect_test/"$modified_filename"
 
+
+# Function to create a CSV file with filename based on JOBNAME and current datestamp
+create_csv_on_ftps() {
+    jobname="$1"
+    current_datestamp=$(date +"%Y%m%d")
+    filename="${jobname}_${current_datestamp}.csv"
+    
+    # send an empty string to create the file directly on the server
+    curl --ftp-ssl -u fs_kobelco-dev:6mCQhWJ90jnUdL -T /dev/null "ftp://kobelco-dev.planning-analytics.cloud.ibm.com/prod/connect_test/$filename"
+    echo "CSV file created on FTP server: $filename"
+}
+
+# Check if exactly 1 argument is provided
+[[ "$#" -ne 1 ]] && echo "Please provide 1 job name" && exit 1
+JOBNAME="$1"
+
+create_csv_on_ftps "$JOBNAME"
