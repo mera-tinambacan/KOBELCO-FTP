@@ -1,0 +1,246 @@
+#!/bin/bash
+# Script Name: s3toftps.sh
+# Script Description: Transfer of File from S3 to FTPS
+# Created by: AWS M. Tinambacan
+# Creation Date: 4/1/2024
+# Update:  4/04/2024 AWS R. Nuno
+#                    Refactor Script
+#                    Made several functions for each process.
+# Update:  4/15/2024 AWS R. Nuno
+#                    Enabled Upload all Files
+# Update:  4/17/2024 AWS R. Nuno
+#                    Fix 文字化け when transferring file
+# Update: 4/17/2024  AWS G. Mayuga
+#                    put put_logs function and constants to common_function "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+# Update: 4/18/2024  AWS R. Nuno
+#                    added check_interface_file function
+#                    removed API status logs , moved it to APIcall.sh
+# Update: 4/22/2024  AWS R. Nuno
+#                    added process/job in interface file
+#                    used the process/job in interface file instead of using parameter in the main function
+# Update: 4/26/2024  AWS A. Hernandez
+#	             Change directory of common_function.sh
+
+# Souce the put_logs functions and constants
+cd "$(dirname "$0")"
+CURDIR=$(pwd)
+source $CURDIR/common_function.sh
+SCRIPTNAME=$(echo $0 | awk -F/ '{print $NF}')
+
+# Cloudwatch Log Group & Stream
+LOG_GROUP_NAME="HostToIPA"
+LOG_STREAM_NAME="RHEL6-HostToIPA-Stream"
+
+check_matched_line() {
+  local matched_line="$1"
+  local s3_key=$2
+  # Check if a match was found
+  if [[ -n "$matched_line" ]]; then
+     # If a match was found, log it as valid and process further
+     put_logs "$?" "[INFO]" "$SCRIPTNAME $s3_key is included interface file." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+     check_file_existence "$s3_key"
+     echo "$matched_line"
+  else
+     # If no match was found, log it as invalid
+     put_logs "$?" "[INFO]" "$SCRIPTNAME $s3_key is invalid or not in the interface file." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+     return 1
+  fi
+}
+
+# Check if it is the interface file
+check_interface_file() {
+    local s3_key=$1
+    # when s3_key is provided
+    if [[ -n $s3_key ]]; then
+        # Search for the $s3_key in the interface file
+        #matched_line=$(grep -w "$s3_key" "$HOSTTOIPA_IF")
+        matched_line=$(grep -w "$s3_key" "$IFFILE")
+	ret_line=$(check_matched_line "$matched_line" $s3_key)
+	echo $ret_line
+    # when no s3_key is provided
+    else
+        s3_files=$(aws s3 ls "s3://$HOSTTOIPA_S3/" | awk 'NF == 4 {print $4}')
+        # Loop through each S3 key
+        if [[ -n $s3_files ]]; then
+            while IFS= read -r s3_key; do
+                # Search for the $s3_key in the interface file
+                #matched_line=$(grep -w "$s3_key" "$HOSTTOIPA_IF")
+                matched_line=$(grep -w "$s3_key" "$IFFILE")
+	        ret_line=$(check_matched_line "$matched_line" $s3_key)
+		echo $ret_line
+            done <<< "$s3_files"
+        else
+            put_logs "$?" "[INFO]" "$SCRIPTNAME No file/s found." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+            exit "$?"
+        fi
+    fi
+}
+
+# Checking if file exist in S3 bucket
+check_file_existence() {
+    local s3_key="$1"
+    put_logs "$?" "$SCRIPTNAME [INFO] Checking $s3_key from $HOSTTOIPA_S3..." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+    # Use "&>/dev/null" to discard any output from the command
+    if aws s3 ls "s3://$HOSTTOIPA_S3/$s3_key" &>/dev/null; then
+        put_logs "$?" "[INFO]" "$SCRIPTNAME $s3_key found in S3 Bucket." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+        return 0
+    else
+        put_logs "$?" "[INFO]" "$SCRIPTNAME $s3_key not found in S3 Bucket." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+        echo "$SCRIPTNAME Error occured. File $s3_key NOT found in S3 Bucket."
+        exit "$?"
+    fi
+}
+
+# Backing up file to s3back-up bucket
+backup() {
+    local s3_key="$1"
+    put_logs "$?" "[INFO]" "$SCRIPTNAME Backing up $s3_key to s3://$HOSTTOIPA_S3_BACKUP/$s3_key..." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+    if aws s3 cp "s3://$HOSTTOIPA_S3/$s3_key" "s3://$HOSTTOIPA_S3_BACKUP/$s3_key"; then
+        put_logs "$?" "[INFO]" "$SCRIPTNAME $s3_key is successfully backed up." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+    else
+        put_logs "$?" "[ERROR]" "$SCRIPTNAME Failed to backup $s3_key." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+        exit $?
+    fi
+}
+
+# [Prerequisite] for transferring file, Copying the file to temp directory
+copy_to_temp_dir() {
+    local s3_key="$1"
+    put_logs "$?" "[INFO]" "$SCRIPTNAME Copying $s3_key to s3://$HOSTTOIPA_S3_BACKUP/$s3_key" "$TEMP_DIR/$s3_key..." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+    if aws s3 cp "s3://$HOSTTOIPA_S3_BACKUP/$s3_key" "$TEMP_DIR/$s3_key"; then
+        put_logs "$?" "[INFO]" "$SCRIPTNAME $s3_key copied successfully." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+    else
+        put_logs "$?" "[ERROR]" "$SCRIPTNAME Failed to copy $s3_key." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+        exit $?
+    fi
+}
+
+# Getting all needed confidential credentials
+fetch_credentials() {
+    # Retrieve username and password from Parameter Store
+    USERNAME=$(get_parameter "/ipa-test/username") && PASSWORD=$(get_parameter "/ipa-test/password")
+
+    # Check the exit status of the previous command
+    if [[ $? -eq 0 ]]; then
+        return 0
+    else
+        # If unsuccessful, log an error and exit with status code 1
+        put_logs "$?" "[ERROR]" "$SCRIPTNAME Cannot retrieve credentials from Parameter Store" "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+        exit 1
+    fi
+}
+
+# Transferring from s3 to FTPS
+transfer_files() {
+    local s3_key="$1"
+    put_logs "$?" "[INFO]" "$SCRIPTNAME Transferring $s3_key to ftp://$FTPS_SERVER/$FTPS_DESTINATION_DIRECTORY..." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+    # Copying the file to temp directory
+    copy_to_temp_dir "$s3_key"
+    local local_file="$TEMP_DIR/$s3_key"
+    # "OPTS UTF8 ON" is used to prevent 文字化け when transfering a file
+    curl -k --ftp-ssl --user "$USERNAME:$PASSWORD" -Q "OPTS UTF8 ON" -T "$local_file" "ftp://$FTPS_SERVER/$FTPS_DESTINATION_DIRECTORY/"
+    local curl_exit_code=$?
+    # Error handling for more specific error may occured
+    case $curl_exit_code in 
+         0)
+            put_logs "$curl_exit_code" "[INFO]" "$SCRIPTNAME $s3_key successfully transferred." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+         ;;
+
+         6)
+            put_logs "$curl_exit_code" "[ERROR]" "$SCRIPTNAME Could not resolve host for $s3_key. Please check the FTPS server configuration." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+            exit $curl_exit_code
+         ;;
+
+         67)
+            put_logs "$curl_exit_code" "[ERROR]" "$SCRIPTNAME Permission denied for $s3_key. Please check directory permissions on the FTPS server." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+            exit $curl_exit_code
+         ;;
+
+	 *)
+            put_logs "$curl_exit_code" "[ERROR]" "$SCRIPTNAME $s3_key transfer failed with exit code $curl_exit_code." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+            exit $curl_exit_code
+	 ;;
+    esac
+}
+
+# Temporary files deletion
+delete_files() {
+    local s3_key="$1"
+    
+    # Deleting the source file from s3 bucket backup
+    put_logs "$?" "[INFO]" "$SCRIPTNAME Deleting $s3_key from $HOSTTOIPA_S3_BACKUP..." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+    if aws s3 rm "s3://$HOSTTOIPA_S3_BACKUP/$s3_key"; then
+        put_logs "$?" "[INFO]" "$SCRIPTNAME Deletion from S3 BACKUP complete." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+    else
+        put_logs "$?" "[ERROR]" "$SCRIPTNAME Failed to delete $s3_key from S3 BACKUP bucket." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+        exit $?
+    fi
+    
+    # Deleting the source file from s3 bucket
+    put_logs "$?" "[INFO]" "$SCRIPTNAME Deleting $s3_key from $HOSTTOIPA_S3..." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+    if aws s3 rm "s3://$HOSTTOIPA_S3/$s3_key"; then
+        put_logs "$?" "[INFO]" "$SCRIPTNAME Deletion from S3 complete." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+    else
+        put_logs "$?" "[ERROR]" "$SCRIPTNAME Failed to delete $s3_key from S3 bucket." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+        exit $?
+    fi
+
+    # Deleting the temporary file from temp directory
+    put_logs "$?" "[INFO]" "$SCRIPTNAME Deleting $s3_key from local directory..." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+    if rm -f "$TEMP_DIR/$s3_key"; then
+        put_logs "$?" "[INFO]" "$SCRIPTNAME Deletion from local directory complete." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+    else
+        put_logs "$?" "[ERROR]" "$SCRIPTNAME Failed to delete $s3_key from local directory." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+        exit $?
+    fi
+}
+
+# Calling API
+call_api() {
+    local process="$1"
+    put_logs "$?" "[INFO]" "$SCRIPTNAME Calling API for $process process..." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+    local api_response=$(${CURDIR}/APIcall.sh "$process")
+}
+
+# Main function
+main() {
+    local s3_key="$1"
+    validated_files=$(check_interface_file $s3_key)
+    # Validate file [if included in interface file and it exist in S3]
+    if [[ -n $validated_files ]]; then
+        # Iterate over each line in validated_files
+        while IFS= read -r validated_file; do
+	    echo $validated_file
+            s3_key=$(echo "$validated_file" | awk '{print $1}')
+            process=$(echo "$validated_file" | awk '{print $2}')
+            ifid=$(echo "$validated_file" | awk '{print $3}')
+            put_logs "$?" "[INFO]" "$SCRIPTNAME Processing S3 key: $s3_key, Process: $process" "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+            # Backing up file in HostToIpa-backup bucket
+            backup "$s3_key"
+            # Transfering file using curl to IPA shared directory
+            transfer_files "$s3_key"
+            # Temporary files deletion
+            delete_files "$s3_key"
+            # Calling the API with the process as argument
+            call_api "$ifid"
+            #call_api "$process"
+        done <<< "$validated_files"
+    else
+        exit 1
+    fi
+}
+
+# Checking Argument
+#if [ "$#" -gt 1 ]; then
+#    echo "1" "[WARN]" "Usage: $0 <s3_key> or Usage: $0"
+#    exit 1
+#fi
+
+scriptname="$(basename "$0")"
+CSVFILE=$(awk -v sn=$scriptname '$4==sn {print $1}' $IFFILE)
+
+fetch_credentials
+main $CSVFILE
+#main "$1"
+
+exit 0

@@ -1,0 +1,195 @@
+#!/bin/bash
+
+# Script Name: ftpstos3.sh
+# Description: to transfer the files from IPA to S3 that are listed on interface_file.txt; Append the file names that have been succesfully transferred to file_transferred.txt; sleep and poll for 60 seconds before checking for new files in the IPA to process.
+# Created by: AWS Mera T.
+# Creation Date: 4/15/2024
+# Script run: 1. bash ftpstos3.sh single <file name>; or
+#             2. bash ftpstos3.sh all
+# Update: 4/18/2024 AWS Mera T.
+#                   put put_logs function and constants to common_function
+#                   backup and delete the files that are listed in the interface_file.txt only
+#                   use -Q "OPTS UTF8 ON" in all curl command
+#                   backup_single_file function is put on comment
+# Update: 4/19/2024 AWS Mera T.
+#                   separate each function for readability
+#                   added transfer of files from IPA to s3
+# Update 4/22/2024  AWS Mera T.
+#                   added poll_files() - Sleeping for 60 seconds before checking for new files to process
+#                   updated the script description
+# Update 4/23/2024  added log group name and stream argument to put_logs function
+#                   added exit 0 to poll function
+#                   change grep -qF to -qw
+# Update 4/29/2024  AWS Mark H.
+#                   Add CURDIR 
+
+# Source the put_logs functions and constants
+cd "$(dirname "$0")"
+CURDIR=$(pwd)
+source ${CURDIR}/common_function.sh
+SCRIPTNAME=$(echo $0 | awk -F/ '{print $NF}')
+ 
+#constants
+LOG_GROUP_NAME="IPAToHost"
+LOG_STREAM_NAME="RHEL6-IPAToHost-Stream"
+
+
+fetch_credentials() {
+    if USERNAME=$(get_parameter "/ipa-test/username") && PASSWORD=$(get_parameter "/ipa-test/password"); then
+        return 0
+    else
+        put_logs "$?" "[ERROR]" "$SCRIPTNAME Invalid $USERNAME credentials " "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+        exit 1
+    fi
+}
+
+check_interface_file() {
+    local file="$1"
+    #if grep -qw "$file" "$IPATOHOST_IF"; then
+    if grep -qw "$file" "$IFFILE"; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+check_file_existence() {
+    local file="$1"
+    if curl -s --ftp-ssl -u "$USERNAME:$PASSWORD" -Q "OPTS UTF8 ON" "ftp://$FTPS_SERVER/$FTPS_DESTINATION_DIRECTORY/$file" >/dev/null; then
+        put_logs "$?" "[INFO]" "$SCRIPTNAME $file found in FTPS Server." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+        return 0
+    else
+        return 1
+    fi
+}
+
+backup_file_to_ftp() {
+    local file="$1"
+    if check_file_existence "$file"; then
+        # Copy the file to the backup directory
+        if curl -s --ftp-ssl -u "$USERNAME:$PASSWORD" -Q "OPTS UTF8 ON" "ftp://$FTPS_SERVER/$FTPS_DESTINATION_DIRECTORY/$file" | \
+            curl -s --ftp-ssl -T - -u "$USERNAME:$PASSWORD" -Q "OPTS UTF8 ON" "ftp://$FTPS_SERVER/$FTPS_BACKUP_DIRECTORY/$file"; then
+            put_logs "$?" "[INFO]" "$SCRIPTNAME File $file copied to backup directory." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+            return 0
+        else
+            put_logs "$?" "[ERROR]" "$SCRIPTNAME Failed to copy file $file to backup directory." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+            return 1
+        fi
+    else
+        return 1
+    fi
+}
+
+copy_to_temp_dir() {
+    local file="$1"
+    if curl -s --ftp-ssl -u "$USERNAME:$PASSWORD" -Q "OPTS UTF8 ON" "ftp://$FTPS_SERVER/$FTPS_DESTINATION_DIRECTORY/$file" -o "$TEMP_DIR/$file"; then
+        put_logs "$?" "[INFO]" "$SCRIPTNAME File $file successfully downloaded to tmp" "$LOG_GROUP_NAME" "$LOG_STREAM_NAME" 
+    else
+        put_logs "$?" "[ERROR]" "$SCRIPTNAME File $file can NOT be downloaded from FTPS server." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+        return 1
+    fi
+}
+
+transfer_files() {
+    local file="$1"
+
+    if aws s3 cp "$TEMP_DIR/$file" "s3://$IPATOHOST_S3/"; then
+        # Append the transferred file name to file_transferred.txt and copy it to FTP server
+        if echo "$file" >> "$TEMP_DIR/file_transferred.txt" && curl -s --ftp-ssl -T "$TEMP_DIR/file_transferred.txt" -u "$USERNAME:$PASSWORD" -Q "OPTS UTF8 ON" "ftp://$FTPS_SERVER/$FTPS_DESTINATION_DIRECTORY/"; then
+            put_logs "$?" "[INFO]" "$SCRIPTNAME File $file successfully transferred from IPA server to S3 bucket." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+            return 0
+        else
+            put_logs "$?" "[ERROR]" "$SCRIPTNAME Failed to append the file name to file_transferred.txt" "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+            return 1
+        fi
+    else
+        put_logs "$?" "[ERROR]" "$SCRIPTNAME Failed to copy file $file from temporary directory to S3 bucket." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+        return 1
+    fi
+}
+
+delete_files() {
+    local file="$1"
+    if curl -k --user "$USERNAME:$PASSWORD" --ftp-ssl -Q "OPTS UTF8 ON" -Q "DELE $FTPS_BACKUP_DIRECTORY/$file" "ftp://$FTPS_SERVER/"; then
+        curl -k --user "$USERNAME:$PASSWORD" --ftp-ssl -Q "OPTS UTF8 ON" -Q "DELE $FTPS_DESTINATION_DIRECTORY/$file" "ftp://$FTPS_SERVER/"
+	put_logs "$?" "[INFO]" "$SCRIPTNAME File $file deleted from source and backup directory." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+        # Delete the file from the temporary directory
+        rm -f "$TEMP_DIR/$file"
+        put_logs "$?" "[INFO]" "$SCRIPTNAME File $file deleted from temporary directory." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+        return 0
+    else
+        put_logs "$?" "[ERROR]" "$SCRIPTNAME Failed to delete file $file from source directory." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+        return 1
+    fi
+}
+
+check_IF() {
+   if [ -s $IFFILE ]; then
+      file=$(awk '$3~/^I/ {print $0}' $IFFILE)
+      echo $file
+   else
+      put_logs "$?" "[ERROR]" "$SCRIPTNAME No $IFFILE found." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+      exit 1 
+   fi
+}
+
+# Main processing function
+process_file() {
+    local file="$1"
+    put_logs "$?" "[INFO]" "Processing file: $file" "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+    
+    if check_interface_file "$file" && backup_file_to_ftp "$file"; then
+        copy_to_temp_dir "$file"
+	[[ $? -eq 1 ]] && return 1
+        transfer_files "$file"
+        delete_files "$file"
+        put_logs "$?" "[INFO]" "$SCRIPTNAME File $file has been processed successfully." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+    else
+        put_logs "$?" "[INFO]" "$SCRIPTNAME File $file NOT found in interface file." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+    fi
+}
+
+# Polling function
+poll_files() {
+    local end_time="$(date -d "tomorrow -1 min 00:00:00 " +%H:%M)"
+    local polling_interval=900
+
+    # Clear the contents of file_transferred.txt
+    #> "$TEMP_DIR/file_transferred.txt"
+
+    while true; do
+        current_time=$(date +"%H:%M")
+        if [[ "$current_time" > "$end_time" ]]; then
+            put_logs "$?" "[INFO]" "$SCRIPTNAME Polling finished." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+            break
+            exit 0
+        fi
+	
+	IFlines=$(check_IF)
+        # Check for files not listed in file_transferred.txt
+        #while IFS= read -r file process ifid; do
+        while read file process ifid autojob ifname; do
+            # for testin
+            #if grep -qw "$file" "$TEMP_DIR/file_transferred.txt"; then
+            #    continue
+            #fi
+
+            if check_file_existence "$file"; then
+                process_file "$file"
+            fi
+        #done < "$IPATOHOST_IF"
+        done <<< "$IFlines"
+
+        put_logs "$?" "[INFO]" "$SCRIPTNAME Sleeping for $polling_interval seconds before checking for new files." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+        echo "$SCRIPTNAME Sleeping for $polling_interval seconds before checking for new files."
+        sleep $polling_interval
+    done
+}
+
+put_logs "$?" "[INFO]" "$SCRIPTNAME Polling started." "$LOG_GROUP_NAME" "$LOG_STREAM_NAME"
+
+check_IF
+fetch_credentials
+poll_files
+
+exit 0

@@ -11,17 +11,15 @@ HOSTTOIPA_S3="ipa-connect-budget/HostToIpa"
 HOSTTOIPA_S3_BACKUP="ipa-connect-budget/HostToIpa-backup"
 IPATOHOST_S3="ipa-connect-budget/IpaToHost"
 
-# LOG GROUP NAME
-HOSTTOIPA_LG="HostToIPA"
-IPATOHOST_LG="IPAToHost"
-
-# LOG STREAM NAME
-HOSTTOIPA_LS="RHEL6-HostToIPA-Stream"
-IPATOHOST_LS="RHEL6-IPAToHost-Stream"
-
 # INTERFACE_FILE
-HOSTTOIPA_IF="/home/ec2-user/s3toftps/interface_file.txt"
-IPATOHOST_IF="/home/ec2-user/s3toftps/Interface_file_IPAtoHost.txt"
+cd "$(dirname "$0")"
+CURDIR=$(pwd)
+IFFILE="${CURDIR}/interface_file.txt"
+#HOSTTOIPA_IF="${CURDIR}/interface_file.txt"
+#HOSTTOIPA_IF="${CURDIR}/interface_file_hosttoipa.txt"
+#IPATOHOST_IF="/home/ec2-user/s3toftps/interface_file_ipatohost.txt"
+#IPATOHOST_IF="${CURDIR}/interface_file_ipatohost.txt"
+#IPATOHOST_IF="${CURDIR}/interface_file.txt"
 
 # functions
 get_parameter() {
@@ -37,11 +35,15 @@ put_logs() {
     local log_group_name="$4"
     local log_stream_name="$5"
     local timestamp=$(date +%s%3N)
-    local log_event="{\"timestamp\": $timestamp, \"message\": \"$log_level - $message\"}"
+    #local log_event="{\"timestamp\": $timestamp, \"message\": \"$log_level - $message\"}"
+    local escaped_message=$(echo "$message" | sed 's/"/\\"/g')  # Escape double quotes
+    local log_event="{\"timestamp\": $timestamp, \"message\": \"$log_level - $escaped_message\"}"
 
+   
+    # This is for APICall.sh  
     if [[ "$log_level" == "[ERROR]" ]]; then
         # Publish error message to SNS
-        aws sns publish --topic-arn "$SNS_TOPIC_ARN" --message "$log_level $message" --subject "ERROR $status_code"
+        aws sns publish --topic-arn "$SNS_TOPIC_ARN" --message "${log_level} ${message}" --subject "ERROR $status_code"
     elif [[ "$message" == *"successfully transferred from IPA server to S3 bucket"* ]]; then
         # Publish success file transfer message to SNS
         aws sns publish --topic-arn "$SNS_TOPIC_ARN" --message "$message" --subject "Successful File Transfer"
@@ -52,6 +54,6 @@ put_logs() {
         --log-group-name "$log_group_name" \
         --log-stream-name "$log_stream_name" \
         --log-events "$log_event" >/dev/null 2>&1
-}
 
+}
 
